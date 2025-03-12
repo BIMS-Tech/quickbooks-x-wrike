@@ -3,8 +3,8 @@ const axios = require("axios");
 const cron = require("node-cron");
 
 const QB_API_URL = `https://sandbox-quickbooks.api.intuit.com/v3/company/${process.env.QB_COMPANY_ID}`;
-const WRIKE_API_URL = 'https://www.wrike.com/api/v4/customfields/'; // Base URL for Wrike API
-const customFieldId = 'IEADHUUVJUAH4J2T'; 
+const WRIKE_API_URL = 'https://www.wrike.com/api/v4/customfields/';
+const customFieldId = 'IEADHUUVJUAH4J4F'; 
 const QB_TOKEN_URL = "https://sandbox-quickbooks.api.intuit.com/oauth2/v1/tokens/bearer";
 
 // Function to refresh QuickBooks access token
@@ -25,8 +25,6 @@ async function refreshToken() {
     );
 
     const { access_token, refresh_token } = response.data;
-
-    // ✅ Update environment variables dynamically (you should also update .env file manually)
     process.env.QB_ACCESS_TOKEN = access_token;
     process.env.QB_REFRESH_TOKEN = refresh_token;
 
@@ -39,12 +37,11 @@ async function refreshToken() {
 // Function to fetch COA from QuickBooks
 async function fetchCOA() {
   try {
-    await refreshToken(); // Ensure token is fresh
-
-    const query = "SELECT * FROM Account"; // Double-check syntax
+    await refreshToken();
+    const query = "SELECT * FROM Account";
     const url = `${QB_API_URL}/query?query=${encodeURIComponent(query)}`;
-    
-    console.log(`🔄 Fetching COA from: ${url}`); // Debugging log
+
+    console.log(`🔄 Fetching COA from: ${url}`);
 
     const response = await axios.get(url, {
       headers: {
@@ -53,98 +50,84 @@ async function fetchCOA() {
       },
     });
 
-    console.log("✅ COA Fetched:", JSON.stringify(response.data, null, 2));
-
-    if (!response.data.QueryResponse || !response.data.QueryResponse.Account) {
+    if (!response.data.QueryResponse?.Account) {
       console.error("❌ No accounts found in QuickBooks response.");
       return [];
     }
 
-    // Filtering only expense accounts
     const accounts = response.data.QueryResponse.Account.filter(acc => acc.AccountType === "Expense");
     return accounts.map(acc => ({ id: acc.Id, value: acc.Name }));
 
   } catch (error) {
-    console.error("❌ Error fetching COA:", JSON.stringify(error.response?.data || error.message, null, 2));
+    console.error("❌ Error fetching COA:", error.response?.data || error.message);
     return [];
   }
 }
 
-// Fetch existing custom field options from Wrike to get valid IDs
+// Fetch existing custom field options from Wrike
 async function fetchWrikeCustomFieldOptions() {
   try {
     const response = await axios.get(
       `${WRIKE_API_URL}${customFieldId}`,
       {
         headers: {
-          Authorization: `Bearer ${process.env.WRIKE_ACCESS_TOKEN}` // Ensure you have your access token
+          Authorization: `Bearer ${process.env.WRIKE_ACCESS_TOKEN}`
         }
       }
     );
-    console.log("✅ Wrike Custom Field Options:", response.data);
-    return response.data;
+
+    if (!response.data?.data?.[0]?.settings?.options) {
+      console.error('❌ Invalid response structure from Wrike:', JSON.stringify(response.data, null, 2));
+      return {};
+    }
+
+    console.log("✅ Wrike Custom Field Options Fetched!");
+    return response.data.data[0].settings.options.reduce((acc, option) => {
+      acc[option.title] = option.id; // Map names to their IDs
+      return acc;
+    }, {});
+
   } catch (error) {
-    console.error('❌ Error fetching custom field options:', error.response?.data || error.message);
+    console.error('❌ Error fetching Wrike custom field options:', error.response?.data || error.message);
+    return {};
   }
 }
 
-
+// Function to update Wrike dropdown
 async function updateWrikeDropdown(accounts) {
   try {
-    // Fetch the current options from Wrike first to get valid IDs
-    const wrikeOptions = await fetchWrikeCustomFieldOptions();
-    
-    // Map QuickBooks account names to valid Wrike option IDs
-    // You should manually verify the Wrike option IDs from the fetched options and map them accordingly
-    const validWrikeIds = {
-      "Marketing Expenses": "valid_wrike_id_for_marketing_expenses",  // Replace with actual Wrike ID
-      // Map other account names to valid Wrike IDs here
-    };
-
-    const formattedOptions = accounts.map(acc => {
-      console.log(`Debug - Account ID: ${acc.id}, Account Name: ${acc.value}`); // Debugging log
-      
-      // Use the mapping to find the corresponding Wrike option ID
-      const wrikeId = validWrikeIds[acc.value]; // Map QuickBooks account name to Wrike valid ID
-
-      if (!wrikeId) {
-        console.error(`❌ No valid Wrike ID found for account: ${acc.value}`);
-        return null; // Skip invalid mappings
-      }
-
-      return {
-        title: acc.value, // Wrike expects 'title' for dropdown options
-        id: wrikeId,        // Use the valid Wrike ID
-      };
-    }).filter(option => option !== null); // Filter out invalid options
+    const wrikeIdsMap = await fetchWrikeCustomFieldOptions();
+    const formattedOptions = accounts.map(acc => ({
+      title: acc.value,
+      id: wrikeIdsMap[acc.value] || null
+    })).filter(option => option.id !== null);
 
     if (formattedOptions.length === 0) {
       console.error("❌ No valid options to update in Wrike.");
       return;
     }
 
-    // Now update Wrike with valid formatted options
+    console.log("🔄 Updating Wrike Custom Field with:", formattedOptions);
+
     const response = await axios.put(
       `${WRIKE_API_URL}${customFieldId}`,
       {
-        title: "Updated Disbursement Category",
-        type: "Dropdown",
-        settings: {
-          options: formattedOptions,  // Use formatted options with valid Wrike IDs
-        }
+        title: "Select Your exp ac",
+        type: "DropDown",
+        settings: { options: formattedOptions }
       },
       {
         headers: {
-          Authorization: `Bearer ${process.env.WRIKE_ACCESS_TOKEN}` // Ensure you have your access token
+          Authorization: `Bearer ${process.env.WRIKE_ACCESS_TOKEN}`
         }
       }
     );
-    console.log('✅ Custom field updated:', response.data);
+
+    console.log("✅ Custom field updated successfully!", response.data);
   } catch (error) {
-    console.error('❌ Error updating custom field:', error.response?.data || error.message);
+    console.error("❌ Error updating Wrike custom field:", error.response?.data || error.message);
   }
 }
-
 
 // Cron job to run daily at midnight
 cron.schedule("0 0 * * *", async () => {
